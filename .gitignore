@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+live_logs/
+.DS_Store
+.pytest_cache/
+
+# 大型可重新產生嘅數據快取（用返fetch腳本就攞得返，唔使入git搞到個repo太大）
+klines_*.json
+funding_history_*.json
+btc_daily_*.json

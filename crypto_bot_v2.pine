@@ -1,0 +1,126 @@
+//@version=6
+strategy("BTC Spot Sweep-Reversal V2",
+     shorttitle="SweepRevV2",
+     overlay=true,
+     initial_capital=10000,
+     currency=currency.USD,
+     default_qty_type=strategy.cash,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,
+     slippage=2)
+
+// ============================================================
+// Inputs
+// ============================================================
+biasTimeframe      = input.timeframe("240", "HTF Bias Timeframe", group="HTF Bias")
+biasEmaPeriod      = input.int(50, "HTF Bias EMA Period", group="HTF Bias")
+
+swingLookback      = input.int(10, "Swing Low Lookback (bars,唔包括當前bar)", group="Sweep設定")
+maxBarsAfterSweep  = input.int(20, "Sweep後最多等幾多支bar做confirm(過期reset)", group="Sweep設定")
+
+stopBufferPct      = input.float(0.1, "Stop Buffer %(sweep low下方)", group="風控", step=0.01) / 100
+rMultiple          = input.float(2.0, "Take Profit R倍數", group="風控")
+breakevenRTrigger  = input.float(1.0, "移平本觸發R倍數", group="風控")
+riskPctPerTrade    = input.float(0.5, "每單風險 % of equity", group="風控", step=0.01) / 100
+
+// ============================================================
+// HTF BIAS:4H close > EMA50 先允許做多
+// lookahead_off = 唔用未收市嘅HTF bar,避免repaint
+// ============================================================
+htfClose = request.security(syminfo.tickerid, biasTimeframe, close, lookahead=barmerge.lookahead_off)
+htfEma   = request.security(syminfo.tickerid, biasTimeframe, ta.ema(close, biasEmaPeriod), lookahead=barmerge.lookahead_off)
+isBull   = htfClose > htfEma
+
+// ============================================================
+// LTF(15m)Swing Low —— 用過去N支bar(唔包括自己)嘅最低,純history reference,唔repaint
+// ============================================================
+swingLow = ta.lowest(low[1], swingLookback)
+
+// ============================================================
+// SWEEP + 反手 狀態機
+// sweep bar定義:呢支bar嘅low跌穿swingLow,但close收返上swingLow之上
+// entry觸發:之後一支或後續bar嘅close高過sweep bar嘅high
+// ============================================================
+var bool  sweepPending   = false
+var float sweepBarHigh   = na
+var float sweepBarLow    = na
+var int   barsSinceSweep = 0
+
+longSignal = false
+
+if not isBull
+    // Spot做唔到short,bias唔係多頭就清晒殘留狀態,避免訊號殘留
+    sweepPending   := false
+    sweepBarHigh   := na
+    sweepBarLow    := na
+    barsSinceSweep := 0
+else if not sweepPending
+    isSweepBar = (low < swingLow) and (close > swingLow)
+    if isSweepBar
+        sweepPending   := true
+        sweepBarHigh   := high
+        sweepBarLow    := low
+        barsSinceSweep := 0
+else
+    barsSinceSweep := barsSinceSweep + 1
+    if barsSinceSweep > maxBarsAfterSweep
+        // 等過咗頭,reference過時,reset避免用殘留訊號
+        sweepPending := false
+        sweepBarHigh := na
+        sweepBarLow  := na
+    else if close > sweepBarHigh
+        // ENTRY觸發
+        longSignal := true
+
+// ============================================================
+// 本場持倉嘅entry/stop/tp追蹤(用嚟計breakeven,避免重複入場)
+// ============================================================
+var float activeEntryPrice = na
+var float activeStopPrice  = na
+var float activeTpPrice    = na
+var bool  breakevenDone    = false
+
+// ENTRY:同一時間只持一單(strategy.position_size==0先俾入)
+if longSignal and strategy.position_size == 0
+    estEntry     = close
+    stopPrice    = sweepBarLow * (1 - stopBufferPct)
+    stopDistance = estEntry - stopPrice
+    if stopDistance > 0
+        riskAmount = strategy.equity * riskPctPerTrade
+        qty        = riskAmount / stopDistance
+        tpPrice    = estEntry + stopDistance * rMultiple
+
+        strategy.entry("Long", strategy.long, qty=qty)
+        strategy.exit("Exit", "Long", stop=stopPrice, limit=tpPrice)
+
+        activeEntryPrice := estEntry
+        activeStopPrice  := stopPrice
+        activeTpPrice    := tpPrice
+        breakevenDone    := false
+
+    // 用咗嘅sweep reference即刻reset,避免下一個bar殘留同一個訊號再次觸發
+    sweepPending := false
+    sweepBarHigh := na
+    sweepBarLow  := na
+
+// ============================================================
+// BREAKEVEN:浮盈達 +1R,將stop移到entry price(TP唔變)
+// ============================================================
+if strategy.position_size > 0 and not breakevenDone
+    initialRisk         = activeEntryPrice - activeStopPrice
+    breakevenTrigPrice  = activeEntryPrice + initialRisk * breakevenRTrigger
+    if high >= breakevenTrigPrice
+        strategy.exit("Exit", "Long", stop=activeEntryPrice, limit=activeTpPrice)
+        activeStopPrice := activeEntryPrice
+        breakevenDone   := true
+
+// 冧咗/食咗TP,position歸零,reset本場持倉狀態等下一次入場
+if strategy.position_size == 0
+    breakevenDone := false
+
+// ============================================================
+// 圖表輔助(唔影響邏輯)
+// ============================================================
+plot(swingLow, "Swing Low", color=color.orange)
+bgcolor(isBull ? color.new(color.green, 90) : color.new(color.red, 90), title="HTF Bias")

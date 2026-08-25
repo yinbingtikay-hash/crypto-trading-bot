@@ -1,0 +1,139 @@
+//@version=6
+// v1.1定案(2026-07-19):stop/TP解耦 + maker限價單成本假設。
+// Python版完整2020-2026驗證:696單、勝率65.5%、PF 1.08、最大回撤-12%,
+// train(2020-2023)/test(2024-2026) out-of-sample驗證過,唔係overfit。
+// ⚠️ commission_value/slippage呢兩個strategy()參數Pine規定要用const,唔可以
+// 用input()——想改就直接改呢兩行數字,或者用TradingView Strategy Tester
+// 嘅Properties tab自己set。
+strategy("Crypto Bot v1.1 - Trend Pullback Decoupled (1H regime + 15m entry)",
+     overlay=true,
+     initial_capital=10000,
+     currency=currency.USD,
+     default_qty_type=strategy.cash,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=1)
+
+// ========== 參數(對應Python config.py同一組數值) ==========
+emaRegimePeriod      = input.int(200, "1H EMA Regime Period")
+emaSlopeLookback     = input.int(20, "1H EMA Slope Lookback (bars)")
+emaEntryPeriod       = input.int(20, "15m EMA Entry Period")
+atrPeriod            = input.int(14, "ATR Period")
+swingLookback        = input.int(10, "Swing Low Lookback")
+pullbackBufferPct    = input.float(0.4, "Pullback Buffer %") / 100
+maxPullbackBars      = input.int(20, "Max Pullback Bars")
+stopAtrMult          = input.float(1.5, "Stop ATR Multiplier")
+tpRMultiple          = input.float(2.0, "Take Profit R Multiple")
+minStopDistancePct   = input.float(4.0, "v1.1: Min Stop Distance %(同TP解耦,唔會令TP跟住闊)") / 100
+riskPctPerTrade      = input.float(0.5, "Risk % Per Trade") / 100
+dailyLossLimitPct    = input.float(2.0, "Daily Loss Limit %") / 100
+consecutiveLossLimit = input.int(3, "Consecutive Loss Pause Threshold")
+resumeTrading        = input.bool(false, "人手確認:解除連續虧損暫停(唔會自動重啟)")
+
+// ========== 1H Regime(多timeframe,lookahead_off避免用未收市嘅1H bar) ==========
+ema200_1h     = request.security(syminfo.tickerid, "60", ta.ema(close, emaRegimePeriod), lookahead=barmerge.lookahead_off)
+ema200_1h_lag = request.security(syminfo.tickerid, "60", ta.ema(close, emaRegimePeriod)[emaSlopeLookback], lookahead=barmerge.lookahead_off)
+close_1h      = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+slope_1h      = (ema200_1h - ema200_1h_lag) / emaSlopeLookback
+isBull        = close_1h > ema200_1h and slope_1h > 0
+
+// ========== 15m Indicators ==========
+ema20    = ta.ema(close, emaEntryPeriod)
+atrVal   = ta.atr(atrPeriod)
+swingLow = ta.lowest(low[1], swingLookback)
+
+// ========== Pullback 狀態機(對應Python嘅PullbackTracker) ==========
+var bool  inPullback     = false
+var float pullbackHigh   = na
+var int   barsInPullback = 0
+var bool  longSignal     = false
+
+longSignal := false
+
+if not isBull
+    inPullback := false
+    pullbackHigh := na
+    barsInPullback := 0
+else if not inPullback
+    enteredZone = low <= ema20 * (1 + pullbackBufferPct) or (not na(swingLow) and low <= swingLow * (1 + pullbackBufferPct))
+    if enteredZone
+        inPullback := true
+        pullbackHigh := high
+        barsInPullback := 1
+else
+    barsInPullback := barsInPullback + 1
+    if barsInPullback > maxPullbackBars
+        inPullback := false
+        pullbackHigh := na
+        barsInPullback := 0
+    else
+        reclaimEma     = close > ema20
+        structureBreak = close > pullbackHigh
+        if reclaimEma and structureBreak
+            longSignal := true
+            inPullback := false
+            pullbackHigh := na
+            barsInPullback := 0
+        else
+            pullbackHigh := math.max(pullbackHigh, high)
+
+// ========== Stop / TP / 部位大細(v1.1:解耦——stop可以闊過原本距離,但TP唔跟住闊) ==========
+originalStopDistance = math.max(close - swingLow, atrVal * stopAtrMult)   // 淨係用嚟計TP
+floorDistance         = close * minStopDistancePct
+widenedStopDistance   = math.max(originalStopDistance, floorDistance)     // 真正落stop用呢個
+
+stopPrice    = close - widenedStopDistance
+tpPrice      = close + originalStopDistance * tpRMultiple                 // TP唔跟stop闊咗而搬
+riskAmount   = strategy.equity * riskPctPerTrade
+qty          = widenedStopDistance > 0 ? riskAmount / widenedStopDistance : 0.0
+
+// ========== 每日停手 ==========
+var float dayStartEquity = strategy.equity
+var int   currentDay     = na
+isNewDay = na(currentDay) or dayofmonth != currentDay
+if isNewDay
+    currentDay := dayofmonth
+    dayStartEquity := strategy.equity
+dailyPnlPct = (strategy.equity - dayStartEquity) / dayStartEquity
+dailyLossOk = dailyPnlPct > -dailyLossLimitPct
+
+// ========== 連續虧損暫停(人手解除,唔自動重啟——同live safety規則一致) ==========
+var int  prevWinTrades     = 0
+var int  prevLossTrades    = 0
+var int  consecutiveLosses = 0
+var bool tradingPaused     = false
+
+if strategy.losstrades > prevLossTrades
+    consecutiveLosses := consecutiveLosses + 1
+    prevLossTrades := strategy.losstrades
+    if consecutiveLosses >= consecutiveLossLimit
+        tradingPaused := true
+
+if strategy.wintrades > prevWinTrades
+    consecutiveLosses := 0
+    prevWinTrades := strategy.wintrades
+
+// backtest代理規則:新一日就自動解除暫停,純粹為咗令backtest行得落去——
+// checkbox input值喺歷史回測入面由頭到尾都係固定,冇辦法模擬「你真係睇咗
+// 先決定解唔解除」,唔加呢個proxy就會同Python之前嗰個bug一樣永久卡死。
+// ⚠️ 呢個淨係backtest用嘅代理,唔係真正live規則——將來實盤執行嗰層先係
+// 應該擺人手審批嘅地方,唔應該將呢個「自動翌日解除」照搬去live用。
+if isNewDay and tradingPaused
+    tradingPaused := false
+    consecutiveLosses := 0
+
+if resumeTrading and tradingPaused
+    tradingPaused := false
+    consecutiveLosses := 0
+
+// ========== 落單 ==========
+canTrade = longSignal and strategy.position_size == 0 and not tradingPaused and dailyLossOk and qty > 0
+
+if canTrade
+    strategy.entry("Long", strategy.long, qty=qty)
+    strategy.exit("Exit", "Long", stop=stopPrice, limit=tpPrice)
+
+// ========== 圖表輔助 ==========
+plot(ema20, "EMA20 (15m)", color=color.blue)
+bgcolor(isBull ? color.new(color.green, 90) : na, title="1H Bull Regime")

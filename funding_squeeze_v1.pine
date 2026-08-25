@@ -1,0 +1,75 @@
+//@version=5
+// Bug fix(用戶叫重check之後搵到):Pine嘅slippage=參數係用「tick數」計,唔係
+// 百分比——BTC而家幾萬蚊一個,5 tick大概得$0.05,即係0.0001%都唔到,同Python
+// 版嘅0.05%滑價假設完全對唔上(仲要BTC由$700升到$10萬+,固定tick數喺唔同價位
+// 代表嘅%都唔同,冇得靠tick數做啱percentage-based嘅假設)。改用commission_value
+// 一次過吸收埋fee+slippage(0.10%+0.05%,入場出場各一次=0.30%來回總成本,同
+// Python版FEE/SLIP設定經濟上等價),先啱BTC呢種價位跨度好大嘅資產。
+strategy("Funding Squeeze Long (BTC spot, cross-validate v1)", overlay=false,
+     initial_capital=10000, currency=currency.USD,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.15,
+     pyramiding=0)
+
+// ============================================================
+// 呢個strategy要擺喺 8 小時(480分鐘)圖表先啱用——540期rolling window
+// 對應Python版嘅180日(180*24/8=540),擺喺第啲timeframe個window意義完全唔同。
+// ============================================================
+// Bug fix(Pine editor報錯:「Cannot use 'bgcolor' in local scope」):bgcolor()
+// 同plot()呢類畫圖function一定要喺全局層面、每個bar都unconditional咁call,
+// 唔可以擺喺if裡面——條件要擺入傳俾佢嘅顏色度(na=呢個bar唔畫色)。
+bgcolor(timeframe.period != "480" ? color.new(color.red, 80) : na)
+
+// ============ Inputs ============
+zWindow     = input.int(540, "Rolling window(bars,對應180日)", minval=30, group="訊號")
+zThreshold  = input.float(-1.5, "Z-score入場門檻", step=0.1, group="訊號")
+holdPeriods = input.int(6, "持有期數(bars,~48h)", minval=1, group="訊號")
+
+// ============================================================
+// ⚠️ 呢一行未經Pine Editor實測——TradingView有個叫cryptoDerivativeMetric嘅
+// library function攞到funding rate,但我查唔到佢實際嘅import/call寫法。
+// 貼咗落editor之後,打「request.」或者搜「funding」睇autocomplete提示,
+// 將以下呢行換成佢建議嘅正確寫法,exchange盡量揀返BINANCE(同Python版一致)。
+// ============================================================
+fundingRate = request.security(syminfo.tickerid, timeframe.period, close - close)  // 佔位,一定要換
+
+// ============ Rolling z-score(causal) ============
+rollMean = ta.sma(fundingRate, zWindow)
+rollStd  = ta.stdev(fundingRate, zWindow)
+z = rollStd > 0 ? (fundingRate - rollMean) / rollStd : na
+
+// ============ 入場/出場 ============
+var int barsInTrade = 0
+var int totalSignals = 0
+
+longCondition = not na(z) and z < zThreshold and strategy.position_size == 0
+if longCondition
+    strategy.entry("Long", strategy.long)
+    barsInTrade := 0
+    totalSignals := totalSignals + 1
+
+if strategy.position_size > 0
+    barsInTrade := barsInTrade + 1
+    if barsInTrade >= holdPeriods
+        strategy.close("Long", comment="持有期滿")
+
+// ============ 可視化(同Python版對數用) ============
+plot(z, "Funding z-score", color=color.new(color.orange, 0))
+hline(0, "0", color=color.new(color.gray, 60))
+hline(zThreshold, "入場門檻", color=color.new(color.red, 0), linestyle=hline.style_dashed)
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 90) : na)
+
+// Bug fix(用戶叫重check之後搵到):之前呢個label硬寫死咗「z<-1.5 hold=6」嗰組
+// 嘅Python參考數字,如果用戶喺input度切換咗第二組z/hold,個對照就會講錯嘢。
+// 而家改成跟住實際揀嘅input動態揀返啱嘅參考數字。
+refText = zThreshold == -1.5 and holdPeriods == 6 ? "n=119 PF=1.61 win%=59.7 (train1.96/test1.42)"
+     : zThreshold == -2.0 and holdPeriods == 6 ? "n=65 PF=1.87 win%=56.9 (train1.98/test1.81)"
+     : zThreshold == -2.0 and holdPeriods == 9 ? "n=59 PF=1.45 win%=59.3 (train1.25/test1.61)"
+     : zThreshold == -1.5 and holdPeriods == 9 ? "n=103 PF=1.36 win%=52.4 (train1.41/test1.32)"
+     : "呢組冇喺Python版test過,冇對照數字"
+
+if barstate.islastconfirmedhistory
+    label.new(bar_index, 0, "z<" + str.tostring(zThreshold) + " hold=" + str.tostring(holdPeriods) +
+         "  訊號總數:" + str.tostring(totalSignals) +
+         "\nPython對照:" + refText,
+         style=label.style_label_up, color=color.navy, textcolor=color.white)

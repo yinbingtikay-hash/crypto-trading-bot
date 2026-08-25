@@ -1,0 +1,57 @@
+//@version=5
+strategy("Crypto Trend Breakout v0.1 (Spot, Long-Only)",
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     initial_capital=10000,
+     currency=currency.USD,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,
+     slippage=2,
+     pyramiding=0)
+
+// ============ Inputs ============
+trendLen  = input.int(200, "Trend filter SMA length")
+entryLen  = input.int(20, "Donchian entry breakout length")
+exitLen   = input.int(10, "Donchian exit breakout length")
+atrLen    = input.int(14, "ATR length (protective stop)")
+atrMult   = input.float(2.5, "ATR stop multiple", step=0.1)
+startDate = input.time(timestamp("2018-01-01T00:00:00"), "Backtest start date")
+
+// ============ Indicators ============
+trendMA = ta.sma(close, trendLen)
+bullishRegime = close > trendMA
+
+entryHigh = ta.highest(high, entryLen)[1]   // prior N-bar high, excludes current forming bar
+exitLow   = ta.lowest(low, exitLen)[1]      // prior M-bar low, excludes current forming bar
+
+atrVal = ta.atr(atrLen)
+inDateRange = time >= startDate
+
+// ============ Entry / Exit logic ============
+crossoverEntry = ta.crossover(close, entryHigh)   // always evaluated every bar, never inside and/if
+crossunderExit = ta.crossunder(close, exitLow)
+
+longCondition = inDateRange and bullishRegime and crossoverEntry
+donchianExit  = crossunderExit
+
+var float entryATR = na
+
+if longCondition
+    entryATR := atrVal
+    strategy.entry("Long", strategy.long)
+
+if strategy.position_size > 0
+    stopLevel = strategy.position_avg_price - atrMult * entryATR
+    strategy.exit("ATR Stop", from_entry="Long", stop=stopLevel)
+else
+    entryATR := na
+
+if donchianExit and strategy.position_size > 0
+    strategy.close("Long", comment="Donchian Exit")
+
+// ============ Plots ============
+plot(trendMA, "Trend SMA", color=color.new(color.orange, 0))
+plot(entryHigh, "Donchian Entry High", color=color.new(color.green, 40))
+plot(exitLow, "Donchian Exit Low", color=color.new(color.red, 40))
+bgcolor(bullishRegime ? color.new(color.green, 95) : color.new(color.red, 95))
