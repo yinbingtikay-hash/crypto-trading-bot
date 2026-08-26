@@ -29,6 +29,7 @@ class FakeConfig:
     z_window = 540
     z_entry_threshold = -2.0
     hold_periods = 6
+    position_size_fraction = 1.0  # 測試用全額，方便同舊斷言嘅數量核對
 
 
 class FakeFetcher:
@@ -109,6 +110,20 @@ def test_enters_position_on_new_signal():
     assert state.in_position is True
     assert len(notifier.entered_calls) == 1
     assert fetcher.orders[0][0] == "buy"
+
+
+def test_position_size_respects_fraction(monkeypatch):
+    """POSITION_SIZE_FRACTION 減半，落單數量應該跟住減半——確認唔再係全倉。"""
+    df = build_funding_df()
+    fetcher = FakeFetcher(funding_df=df, equity=10_000.0, last_price=100.0)
+    monkeypatch.setattr(fetcher.config, "position_size_fraction", 0.25, raising=False)
+    notifier = FakeNotifier()
+    state = BotState()
+
+    run_once(fetcher, notifier, state)
+
+    expected_qty = (10_000.0 * 0.25 * 0.999) / 100.0
+    assert fetcher.orders[0][1] == pytest.approx(expected_qty)
 
 
 def test_does_not_reenter_for_same_signal():

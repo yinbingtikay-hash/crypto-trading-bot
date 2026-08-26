@@ -48,6 +48,12 @@ class Config:
     z_entry_threshold: float
     hold_periods: int  # 單位：funding事件次數（每次8小時）
 
+    # 每筆交易用可用資金嘅幾多%（backtest驗證嗰陣用100%全倉，但live/未來
+    # 想轉真錢嘅話全倉太進取——單一筆押晒成副身家。降低呢個比例純粹係
+    # money management，唔會改變已驗證嘅勝率/每筆%回報，淨係減低單一筆
+    # 波動對成副資金嘅影響。）
+    position_size_fraction: float
+
     poll_interval_seconds: int
 
     # Telegram
@@ -66,6 +72,9 @@ class Config:
         if self.hold_periods <= 0:
             errors.append("HOLD_PERIODS 必須大於 0")
 
+        if not (0 < self.position_size_fraction <= 1):
+            errors.append("POSITION_SIZE_FRACTION 必須介於 0（不含）到 1（含）之間")
+
         if not self.telegram_bot_token or not self.telegram_chat_id:
             errors.append("未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID")
 
@@ -82,6 +91,7 @@ def load_config() -> Config:
         z_window=_get_int("Z_WINDOW", 540),
         z_entry_threshold=_get_float("Z_ENTRY_THRESHOLD", -2.0),
         hold_periods=_get_int("HOLD_PERIODS", 6),
+        position_size_fraction=_get_float("POSITION_SIZE_FRACTION", 0.25),
         poll_interval_seconds=_get_int("POLL_INTERVAL_SECONDS", 300),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),

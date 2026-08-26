@@ -1,12 +1,13 @@
 """主程序：Funding Squeeze Long——輪詢 Binance Futures 嘅 funding rate，
-z-score 跌穿門檻就用 Spot 全倉市價買入，持夠 HOLD_PERIODS 個 funding 週期
-（每個 8 小時）後市價賣出。冇止損（已經雙 engine 驗證過：加止損反而拖低
-表現，見 funding_squeeze_backtest.py / funding_squeeze_v2_independent.py）。
+z-score 跌穿門檻就用 Spot 市價買入（數量＝可用資金 × POSITION_SIZE_FRACTION），
+持夠 HOLD_PERIODS 個 funding 週期（每個 8 小時）後市價賣出。冇止損（已經雙
+engine 驗證過：加止損反而拖低表現，見 funding_squeeze_backtest.py /
+funding_squeeze_v2_independent.py）。
 
 ⚠️ 安全提示：USE_TESTNET=true 時只會喺 Spot Testnet 落單，唔涉及真實資金。
-⚠️ 倉位大小＝全部可用資金（同已驗證嘅 backtest 一致嘅 sizing），呢個唔係
-保守設定——如果將來轉正式帳戶，落地前要重新評估呢個 all-in 單一倉位嘅
-sizing 是否合適。
+⚠️ Backtest 驗證嗰陣用嘅係100%全倉 sizing，而家 live 版預設淨係用25%
+（POSITION_SIZE_FRACTION），純粹減低單一筆對成副資金嘅波動——每筆%回報/
+勝率同backtest一致，改嘅淨係「一鋪押幾多」，唔係策略本身。
 """
 
 import logging
@@ -21,6 +22,7 @@ import ccxt
 import live_commands as commands
 import live_position_state as position_state
 import live_trade_log as trade_log
+import pid_lock
 from live_config import ConfigError, get_config
 from live_data_fetcher import DataFetcher
 from live_notifier import Notifier
@@ -32,6 +34,7 @@ logger = logging.getLogger("live_main")
 _LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_logs")
 TRADE_LOG_PATH = os.path.join(_LOGS_DIR, "trade_history.csv")
 POSITION_STATE_PATH = os.path.join(_LOGS_DIR, "position_state.json")
+PID_LOCK_PATH = os.path.join(_LOGS_DIR, "bot.pid")
 
 _shutdown_requested = False
 
@@ -133,7 +136,8 @@ def try_enter_position(fetcher: DataFetcher, notifier: Notifier, state: BotState
         return
 
     entry_price = fetcher.fetch_last_price()
-    quantity = (equity * 0.999) / entry_price  # 全倉，留少少buffer畀手續費/精度
+    # 用可用資金嘅 POSITION_SIZE_FRACTION（預設25%），唔係全倉——留少少buffer畀手續費/精度
+    quantity = (equity * config.position_size_fraction * 0.999) / entry_price
     if quantity <= 0:
         logger.warning("計算出的倉位數量為 0，略過本次進場")
         return
@@ -196,6 +200,16 @@ def reconcile_existing_position(fetcher: DataFetcher, notifier: Notifier, state:
 
 
 def main():
+    # 一定要最先做：確保冇第二個process已經running緊（曾經因為冇呢層檢查，
+    # 兩個殭屍process同時跑咗2日都冇人發現）。
+    pid_lock.acquire_singleton_lock(PID_LOCK_PATH)
+    try:
+        _run()
+    finally:
+        pid_lock.release_singleton_lock(PID_LOCK_PATH)
+
+
+def _run():
     try:
         config = get_config()
         config.validate()
