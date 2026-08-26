@@ -19,10 +19,11 @@ SLIP = 0.0005
 Z_WINDOW = 540
 
 
-def load_funding_and_price():
-    with open(f"funding_history_{SYMBOL}.json") as f:
+def load_funding_and_price(symbol=None):
+    symbol = symbol or SYMBOL
+    with open(f"funding_history_{symbol}.json") as f:
         funding_raw = json.load(f)
-    with open(f"klines_{SYMBOL}_1h.json") as f:
+    with open(f"klines_{symbol}_1h.json") as f:
         klines_raw = json.load(f)
 
     funding = pd.DataFrame(funding_raw)

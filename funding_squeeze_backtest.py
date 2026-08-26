@@ -26,10 +26,11 @@ Z_ENTRY_THRESHOLD = -2.0  # funding z-score跌穿呢個先入場
 HOLD_PERIODS = 9        # 9 * 8h = 3日,對應exploratory check嗰個72h窗口
 
 
-def load_data():
-    with open(f"funding_history_{SYMBOL}.json") as f:
+def load_data(symbol=None):
+    symbol = symbol or SYMBOL
+    with open(f"funding_history_{symbol}.json") as f:
         funding = json.load(f)
-    with open(f"klines_{SYMBOL}_1h.json") as f:
+    with open(f"klines_{symbol}_1h.json") as f:
         klines = json.load(f)
     price_by_hour = {int(k[0]) // 1000: float(k[4]) for k in klines}
     low_by_hour = {int(k[0]) // 1000: float(k[3]) for k in klines}
